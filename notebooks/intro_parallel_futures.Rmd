@@ -1,0 +1,82 @@
+---
+title: "Parallel computing and futures"
+output: html_notebook
+---
+
+_Note: These notes borrow heavily from Alex Reinhart's lecture notes for [Advanced Statistical Computing from Spring 2019](https://www.refsmmat.com/courses/751/index.html)_
+
+# Computer architecture background
+
+```{r, echo = FALSE, out.width = "40%", warning = FALSE, message = FALSE}
+library(tidyverse)
+library(cowplot)
+comp_svg <- ggdraw() + draw_image("https://www.refsmmat.com/courses/751/images/computer-arch.svg")
+plot(comp_svg)
+#knitr::include_graphics("https://www.refsmmat.com/courses/751/images/computer-arch.svg")
+```
+
+__Main Memory (RAM)__: large, fast, random access storage where each slot in memory has a unique address. But its contents are lost once power is off and can't be used to store data permanently. 
+
+__Bus__: Allows transfer of data between parts of the computer.
+
+__Central Processing Unit (CPU)__: computer's control center, carries out the instructions given by programs. 
+
++ __Registers__: Fast storage used in executing instructions, vary between general and specialized purposes. CPU uses registers to manage control of the program's flow. In the ideal world we would want all of our data in registers, but that's not physically possible. Only useful for what you're operating on __right now__ with a particular set of instructions. CPU instructions to request data from RAM to load into registers, but that's a slow process...
+
++ __Cache__: Small but fast memory unit that is orders of magnitude faster than RAM. When a program loads data from RAM, CPU automatically stores copies of it in the cache to make it available for registers. Processor tracks any modifications to data in cache to then updates RAM copies of data. Cache usage affects performance, e.g., you'll hit a point when loading a large matrix that data no longer fits in cache and the processor must retrieve it from main main memory. 
+
+How a CPU runs a program:
+
++ Takes a starting address that points to the machine code of the program
+
++ Proceeds through the instructions:
+
+  + Modifying registers and memory (plus any interaction with external storage or ports)
+  
+  + Keeps track of where it is in the code
+
+Over-simplified summary: CPUs are machines that execute instructions and shuffle data between RAM, cache, and registers.
+
+## Multi-core machines
+
+What happens when we have multiple CPUs in a single machine? (aka a modern computer)
+
+__Symmetric multiprocessing__: multiple CPUs connected to the same bus, with still only one source of main memory but each processor has its own cache. Works well when running multiple tasks, e.g. running a web browser and R simultaneously on two separate processors.
+
+What happens if we have two different processors modifying the same memory at the same time:
+
+1. Processor 1 is working with some data from RAM, so a copy is loaded into its cache.
+2. Processor 2 starts working with that same data, so it loads its own copy into its cache.
+3. Processor 1 modifies the data on its cache, then writes back to RAM. 
+4. Processor 2 is stuch with an older version of the data!
+
+This is known as __incoherence__ - thus processors must have methods to ensure __cache coherence__, e.g. deleting Processor 2's cache data when Processor 1 modifies it on RAM forcing Processor 2 to fetch the updated version from RAM the next time it accesses the data.
+
+__This has important implications for speed of parallel programs.__
+
+# Parallel computing
+
+## Concurrency versus Parallelism
+
++ __Concurrency__: managing multiple tasks that share resources (e.g., data in memory)
+
+  + Challenge is controlling access to shared resources
+  
+  + Operating systems enable concurrency through spawning __processes__ and __threads__
+  
+  + __Process__: basically a program combined with its activity, including data in memory and files currently open. Multiple processes are always concurrent but still isolated from each other (Process 1 cannot interfere with Process 2's execution), and may run in parallel with several processors
+  
+  + __Thread__: Lower level of a process, you can create multiple threads inside a single process where each thread shares memory access. 
+
++ __Parallelism__: performing many tasks simultaneously
+
+
+
+
+
+
+
+
+
+
+
