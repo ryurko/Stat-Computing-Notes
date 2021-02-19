@@ -66,7 +66,7 @@ __This has important implications for speed of parallel programs.__
   
   + __Process__: basically a program combined with its activity, including data in memory and files currently open. Multiple processes are always concurrent but still isolated from each other (Process 1 cannot interfere with Process 2's execution), and may run in parallel with several processors
   
-  + __Thread__: Lower level of a process, you can create multiple threads inside a single process where each thread shares memory access. 
+  + __Thread__: Lower level of a process, you can create multiple threads inside a single process where each thread shares memory access. Spawning
 
 + __Parallelism__: performing many tasks simultaneously
 
