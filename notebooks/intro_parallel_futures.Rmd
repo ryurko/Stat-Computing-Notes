@@ -136,14 +136,16 @@ foo_mclapply_time["sys.self"]
 foo_mclapply_time["sys.child"]
 ```
 
-The above means the actual program did not cost anything, but __the increase in
-time was driven by the system overhead in managing the child processes!__ 
+__The increase in time was driven by the system overhead in managing the child processes!__ 
 
 Here's a more useful example where there is substantial computation that we benefit from
 using parallelization:
 
 ```{r}
-sim_pvals_data <- function(null_prop = .85, alt_center = 3, n_tests = 1000) {
+sim_pvals_data <- function(random_seed,
+                           null_prop = .85, alt_center = 3, n_tests = 1000) {
+  
+  set.seed(random_seed)
   # First generate the test type using the null_prop:
   test_type <- ifelse(rbinom(n = n_tests, size = 1, null_prop) == 1,
                       "h0", "h1")
@@ -186,7 +188,7 @@ get_adapt_intercept_results <- function(sim_data, alpha = 0.05) {
 ```
 
 
-And now again run a comparison...
+And now again run a comparison where the parallel version wins.
 
 ```{r mclapply-adapt-example}
 # Compare the lapply with parallel version:
@@ -194,13 +196,13 @@ lapply_adapt_results <- microbenchmark(
   basic_lapply = {
     lapply_sim_list <- lapply(1:4, 
                               function(x) {
-                                get_adapt_intercept_results(sim_pvals_data())
+                                get_adapt_intercept_results(sim_pvals_data(x))
                               })
     },
   parallel_mclapply = {
     mclapply_sim_list <- mclapply(1:4,  
                               function(x) {
-                                get_adapt_intercept_results(sim_pvals_data())
+                                get_adapt_intercept_results(sim_pvals_data(x))
                               },
                               mc.cores = 4)
     },
@@ -210,7 +212,6 @@ lapply_adapt_results <- microbenchmark(
 lapply_adapt_results
 ```
 
-Parallel version wins!
 
 # Back to the futures
 
@@ -219,60 +220,87 @@ expressions that may be available to use in, you guessed it, the future. These a
 can either be __unresolved__ or __resolved__, where you can run various pieces of code using
 futures such that other parts do not yet need to be complete. If the code expression
 is __unresolved__ but its value is requested, then the current process is __blocked__
-until the future is resolved. Once code is __resolved__ then its value is available. 
+until the future is resolved. Once code is __resolved__ then its value is available. Fortunately, it is rather easy to implement the use of _futures_ in `R` with the
+[`future` package](https://github.com/HenrikBengtsson/future). Here's a simple example from the [intro vignette](https://cran.r-project.org/web/packages/future/vignettes/future-1-overview.html):
+
+```{r example}
+# First create a variable where a message is displayed
+foo_x <- {
+  cat("Hello world\n")
+  42
+}
+```
+
+And then we get can get the value:
+```{r}
+foo_x
+```
+
+But what about the `future` version?
+
+```{r future-example}
+library(future)
+# Now the future version - using `%<-%` 
+future_foo_x %<-% {
+  cat("Hello world\n")
+  42
+}
+```
+
+The message is not displayed! That's because the process has not been resolved yet:
+
+```{r}
+future_foo_x
+```
+
+So why do we care about this? Because we can __plan__ how to separate resolving `R` processes so that the current process is __not__ blocked:
+
+```{r}
+plan(multisession, workers = 2)
+future_foo_x %<-% {
+  cat("Hello world\n")
+  42
+}
+future_foo_x
+```
+
+This basically means we have a simple but flexible way for parallel / distributed processing. (You can replace the implicit `%<-%` operator, with explicit with `future()` and `value()` function calls, see the [intro vignette](https://cran.r-project.org/web/packages/future/vignettes/future-1-overview.html).
+
 There are many ways to plan future resolution, for instance, using futures 
 in conjuction with multicore (parallelization) for resolving futures is a simple 
-way to speed up your code.
+way to speed up your code. The `future` package is essentially the backbone for other packages:
 
-Fortunately, it is rather easy to implement the use of _futures_ in `R` with the
-[`future` package](https://cran.r-project.org/web/packages/future/vignettes/future-1-overview.html). 
-The `future` package is essentially the backbone for several other packages:
++ [doFuture](https://github.com/HenrikBengtsson/doFuture)
 
 + [`future.apply`](https://cran.r-project.org/web/packages/future.apply/vignettes/future.apply-1-overview.html)
 
 + tidyverse style with [`furrr`](https://davisvaughan.github.io/furrr/)
 
-
-This vignette demonstrates the use of the `future` package
-in the context of generating p-values for multiple comparisons. Using the [`microbenchmark`](https://cran.r-project.org/web/packages/microbenchmark/index.html)
-package, we compare the performance of various implementations of future abstractions
-and parallel implementations with -apply like functions via the [`future.apply`](https://cran.r-project.org/web/packages/future.apply/index.html)
-function and [`furrr`](https://github.com/DavisVaughan/furrr). This vignette will
-__not__ cover the basic usage of the `future` package with implicit future
-assignment via the `%<-%` operator, or explicitly with `future()` and `value()` 
-since these are applied to individual expressions rather than the operations
-typically used in vectorized functions. The reader should refer to the [`future` intro vignette](https://cran.r-project.org/web/packages/future/vignettes/future-1-overview.html) 
-for these operations.
-
-
-```{r future-example}
-library(future)
+```{r future-lapply-example}
 library(future.apply)
-
+library(furrr)
+# Switch back to sequential - regular future evaluation
+plan(sequential)
 # Compare the lapply with parallel version:
 future_lapply_results <- microbenchmark(
-  basic_lapply = {
-    lapply_sim_list <- 
-      lapply(1:4, function(x) { 
-        get_adapt_intercept_results(sim_pvals_data())
-        })
-    },
-  future_lapply = {
+  future_apply = {
     future_lapply_sim_list <- 
       future_lapply(1:4, function(x) {
-        get_adapt_intercept_results(sim_pvals_data())
-        }, future.seed = NULL)
+        get_adapt_intercept_results(sim_pvals_data(x))
+        }, future.seed = FALSE)
+    },
+  furrr = {
+    furrr_sim_list <- 
+      future_map(1:4, function(x) {
+        get_adapt_intercept_results(sim_pvals_data(x))
+        })
     },
   times = 10)
 future_lapply_results
 ```
 
-
-However, the real power from using futures is by asynchronous evaluation via 
-parallelisation. Rather than _blocking_ the current process to evaluate a future expression, the current process continues to run while a separate process is used to evaluate the expression for its value. To do
-this, all we need to do is add the `plan()` command prior to the `future_lapply`
-function call.
-
+The real power from using futures is by asynchronous evaluation via 
+parallelization. Rather than _blocking_ the current process to evaluate a future expression, the current process continues to run while a separate process is used to evaluate the expression for its value. We do this via the different options for the `plan()` function.
 
 Name |	OSes|	Description |
 -----| -----|-------------|
@@ -285,26 +313,41 @@ multicore |	not Windows/not RStudio |	forked R processes (on current machine) |
 cluster	| all |	external R sessions on current, local, and/or remote machines |
 remote |	all	 | Simple access to remote R sessions |
 
-
-Before, without specifying the `plan`, the `future` package
-by default implements `plan(sequential)` for synchronous evaluation on the
-current process. We can specify parallel evaluation via `plan(multisession)` or
-`plan(multicore)` for forked processes (but for this demo we'll use multisession since 
-`multicore` does NOT work in RStudio). We'll also `tweak` the `multisession` plan
-to use four cores:
+Without specifying the `plan`, the `future` package by default implements `plan(sequential)` for synchronous evaluation on the current process. We can specify parallel evaluation via `plan(multisession)` or `plan(multicore)` for forked processes (but for this demo we'll use multisession since  `multicore` does NOT work in RStudio). We'll also change the number of cores (`workers`) to four (you can also do this with the `tweak` function). We'll make the comparison to `mclapply` with more than four iterations:
 
 ```{r plan-future-example}
 # Compare the lapply with parallel version:
-plan_future_lapply_results <- microbenchmark(
-  plan_future_lapply = {
-    plan(tweak(multisession, workers = 4))
+plan(multisession, workers = 4)
+multisession_results <- microbenchmark(
+  future_apply = {
     future_lapply_sim_list <- 
-      future_lapply(1:4, function(x) {
-        get_adapt_intercept_results(sim_pvals_data())
-        }, future.seed = NULL)
+      future_lapply(1:8, function(x) {
+        get_adapt_intercept_results(sim_pvals_data(x))
+        }, future.seed = FALSE)
+    },
+  furrr = {
+    furrr_sim_list <- 
+      future_map(1:8, function(x) {
+        get_adapt_intercept_results(sim_pvals_data(x))
+        })
+    },
+  parallel_mclapply = {
+    mclapply_sim_list <- mclapply(1:8,  
+                              function(x) {
+                                get_adapt_intercept_results(sim_pvals_data(x))
+                              },
+                              mc.cores = 4)
     },
   times = 10)
-plan_future_lapply_results
+multisession_results
 ```
 
+![](https://conklinmedia.com/wp-content/uploads/2020/08/great-scott-conklin-media.gif)
 
+
+## Resources to check out
+
++ [Alex's 36-751 lecture notes](https://www.refsmmat.com/courses/751/notes/index.html)
++ [`future` package overview](https://cran.r-project.org/web/packages/future/vignettes/future-1-overview.html) - for more examples like nested futures, e.g., `plan(list(multisession, multisession))` and also [recent talk](https://docs.google.com/presentation/d/1Wn5S91UGIOrc4IyXoV074ij5vGF8I0Km0tCfintyIa4/present?includes_info_params=1&eisi=CM2mhIXwsecCFQyuJgodBQAJ8A&slide=id.p) with info on things like progress bars
++ [`furrr` package documentation](https://davisvaughan.github.io/furrr/index.html)
++ [Remote connections with `furrr`](https://davisvaughan.github.io/furrr/articles/advanced-furrr-remote-connections.html)
