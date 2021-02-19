@@ -54,29 +54,257 @@ This is known as __incoherence__ - thus processors must have methods to ensure _
 
 __This has important implications for speed of parallel programs.__
 
-# Parallel computing
 
-## Concurrency versus Parallelism
+# Concurrency versus Parallelism
 
 + __Concurrency__: managing multiple tasks that share resources (e.g., data in memory)
 
   + Challenge is controlling access to shared resources
   
-  + Operating systems enable concurrency through spawning __processes__ and __threads__
+  + Operating systems enable concurrency through spawning (aka creating) __processes__ and __threads__
   
   + __Process__: basically a program combined with its activity, including data in memory and files currently open. Multiple processes are always concurrent but still isolated from each other (Process 1 cannot interfere with Process 2's execution), and may run in parallel with several processors
   
-  + __Thread__: Lower level of a process, you can create multiple threads inside a single process where each thread shares memory access. Spawning
-
+  + __Thread__: Lower level of a process, you can create multiple threads inside a single process where each thread shares memory access. Spawning processes and threads is not free and requires bookkeeping. Concurrency and paralellism frameworks typically create a __thread pool__ of ready-to-use threads for tasks to avoid the creation step.
+  
 + __Parallelism__: performing many tasks simultaneously
 
+# What the fork
+
+Two core operations for creating processes are `fork` and `exec` (for Unix-like systems). These are __system calls__ made by programs to the OS.
+
++ `fork` creates a copy of a process: a _parent_ process divides itself ("forks") into two identical processes, with access to open files, registers, and all memory allocations, including the program's executable code. 
+  + New, forked process is called the _child_, has a new process identifier (PID) distinguishing itself
+  + Memory is not copied because modern computing uses __copy on write__: both processes use the same memory until one modifies any chunk of memory, it then receives its own personal copy of that chunk.
+  
++ `exec` replaces a process with another one... by forking:
+  + `fork` the process
+  + parent process keeps going
+  + child `exec` new program to run, replacing the child with the new program
+  
+# Parallel computing
+
+The `parallel` package is built into `R` with the basic parellelized versions of 
+typically used functions such as `mclapply` instead of `lapply`. From Roger Peng's [`R` Programming for Data Science](https://bookdown.org/rdpeng/rprogdatascience/):
+
+>The mclapply() function (and related mc* functions) works via the fork mechanism on Unix-style operating systems. Briefly, your R session is the main process and when you call a function like mclapply(), you fork a series of sub-processes that operate independently from the main process (although they share a few low-level features). These sub-processes then execute your function on their subsets of the data, presumably on separate cores of your CPU. Once the computation is complete, each sub-process returns its results and then the sub-process is killed. The parallel package manages the logistics of forking the sub-processes and handling them once they’ve finished.
 
 
+```{r mclapply-example}
+library(parallel)
+library(microbenchmark)
+
+# Make a pointless function
+foo <- function(n = 1000) mean(rnorm(n))
+
+# Compare the lapply with parallel version:
+init_lapply_results <- microbenchmark(
+  basic_lapply = {
+    lapply_sim_list <- lapply(1:100, foo)
+    },
+  parallel_mclapply = {
+    mclapply_sim_list <- mclapply(1:100, foo, mc.cores = 4)
+    },
+  times = 100)
+init_lapply_results
+```
+
+It's slower but why? Can get a better understanding via `system.time`:
+
+```{r lapply-slow-time}
+foo_lapply_time <- 
+  system.time({
+         foo_list <- lapply(1:100, foo)
+})
+foo_lapply_time
+```
 
 
+```{r mclapply-slow-time}
+foo_mclapply_time <- 
+  system.time({
+         foo_list <- mclapply(1:100, foo, mc.cores = 4)
+})
+foo_mclapply_time
+```
+
+We can check the difference in time `R` spends in the main and the child processes:
+```{r check-main-child}
+foo_mclapply_time["user.self"]
+foo_mclapply_time["user.child"]
+foo_mclapply_time["sys.self"]
+foo_mclapply_time["sys.child"]
+```
+
+The above means the actual program did not cost anything, but __the increase in
+time was driven by the system overhead in managing the child processes!__ 
+
+Here's a more useful example where there is substantial computation that we benefit from
+using parallelization:
+
+```{r}
+sim_pvals_data <- function(null_prop = .85, alt_center = 3, n_tests = 1000) {
+  # First generate the test type using the null_prop:
+  test_type <- ifelse(rbinom(n = n_tests, size = 1, null_prop) == 1,
+                      "h0", "h1")
+  # Now depending on the test type generate the true means:
+  effect_size_center <- ifelse(test_type == "h0", 0,
+                               rnorm(n_tests, mean = alt_center))
+  # The observed effect sizes (z-scores):
+  observed_effect_size <- rnorm(n_tests, mean = effect_size_center)
+  # Finally the two-sided p-values:
+  pvals <- 2 * pnorm(-abs(observed_effect_size))
+  # Return the data frame of these results:
+  data.frame("test_type" = test_type,
+             "effect_size_center" = effect_size_center,
+             "observed_effect_size" = observed_effect_size,
+             "pvals" = pvals)
+}
+
+library(adaptMT)
+# This function takes in a simulated dataset using the sim_pvals_data function
+# above, and returns the fdp and power for the intercept-only AdaPT model results
+# at the target level alpha:
+get_adapt_intercept_results <- function(sim_data, alpha = 0.05) {
+  # Generate the intercept only model results:
+  adapt_int_only <- adapt_glm(sim_data, sim_data$pvals,
+                              pi_formulas = "1", mu_formulas = "1",
+                              verbose = list(print = FALSE, fit = FALSE,
+                                             ms = FALSE))
+  # Access the discoveries for alpha:
+  adapt_disc <- which(adapt_int_only$qvals < alpha)
+  # Vector of true nulls:
+  true_nulls <- which(sim_data$test_type == "h0")
+  # Vector of true alternatives:
+  true_alts <- which(sim_data$test_type == "h1")
+  # Return the fdp and power:
+  return(list("fdp" = length(which(adapt_disc %in% true_nulls)) / length(adapt_disc),
+              "power" = length(which(adapt_disc %in% true_alts)) / length(true_alts)))
+}
 
 
+```
 
 
+And now again run a comparison...
+
+```{r mclapply-adapt-example}
+# Compare the lapply with parallel version:
+lapply_adapt_results <- microbenchmark(
+  basic_lapply = {
+    lapply_sim_list <- lapply(1:4, 
+                              function(x) {
+                                get_adapt_intercept_results(sim_pvals_data())
+                              })
+    },
+  parallel_mclapply = {
+    mclapply_sim_list <- mclapply(1:4,  
+                              function(x) {
+                                get_adapt_intercept_results(sim_pvals_data())
+                              },
+                              mc.cores = 4)
+    },
+  # Number of times to compare (should use a higher value but only 10 times
+  # here for demonstrative purposes:
+  times = 10)
+lapply_adapt_results
+```
+
+Parallel version wins!
+
+# Back to the futures
+
+However, lesser known but also useful tools are _future_ abstractions. _Futures_ are 
+expressions that may be available to use in, you guessed it, the future. These abstractions 
+can either be __unresolved__ or __resolved__, where you can run various pieces of code using
+futures such that other parts do not yet need to be complete. If the code expression
+is __unresolved__ but its value is requested, then the current process is __blocked__
+until the future is resolved. Once code is __resolved__ then its value is available. 
+There are many ways to plan future resolution, for instance, using futures 
+in conjuction with multicore (parallelization) for resolving futures is a simple 
+way to speed up your code.
+
+Fortunately, it is rather easy to implement the use of _futures_ in `R` with the
+[`future` package](https://cran.r-project.org/web/packages/future/vignettes/future-1-overview.html). 
+The `future` package is essentially the backbone for several other packages:
+
++ [`future.apply`](https://cran.r-project.org/web/packages/future.apply/vignettes/future.apply-1-overview.html)
+
++ tidyverse style with [`furrr`](https://davisvaughan.github.io/furrr/)
+
+
+This vignette demonstrates the use of the `future` package
+in the context of generating p-values for multiple comparisons. Using the [`microbenchmark`](https://cran.r-project.org/web/packages/microbenchmark/index.html)
+package, we compare the performance of various implementations of future abstractions
+and parallel implementations with -apply like functions via the [`future.apply`](https://cran.r-project.org/web/packages/future.apply/index.html)
+function and [`furrr`](https://github.com/DavisVaughan/furrr). This vignette will
+__not__ cover the basic usage of the `future` package with implicit future
+assignment via the `%<-%` operator, or explicitly with `future()` and `value()` 
+since these are applied to individual expressions rather than the operations
+typically used in vectorized functions. The reader should refer to the [`future` intro vignette](https://cran.r-project.org/web/packages/future/vignettes/future-1-overview.html) 
+for these operations.
+
+
+```{r future-example}
+library(future)
+library(future.apply)
+
+# Compare the lapply with parallel version:
+future_lapply_results <- microbenchmark(
+  basic_lapply = {
+    lapply_sim_list <- 
+      lapply(1:4, function(x) { 
+        get_adapt_intercept_results(sim_pvals_data())
+        })
+    },
+  future_lapply = {
+    future_lapply_sim_list <- 
+      future_lapply(1:4, function(x) {
+        get_adapt_intercept_results(sim_pvals_data())
+        }, future.seed = NULL)
+    },
+  times = 10)
+future_lapply_results
+```
+
+
+However, the real power from using futures is by asynchronous evaluation via 
+parallelisation. Rather than _blocking_ the current process to evaluate a future expression, the current process continues to run while a separate process is used to evaluate the expression for its value. To do
+this, all we need to do is add the `plan()` command prior to the `future_lapply`
+function call.
+
+
+Name |	OSes|	Description |
+-----| -----|-------------|
+synchronous: |	|	non-parallel: |
+sequential |	all	| sequentially and in the current R process |
+transparent	| all | as sequential w/ early signaling and w/out local (for debugging)|
+asynchronous:	|	 | parallel: |
+multisession	| all	| background R sessions (on current machine) |
+multicore |	not Windows/not RStudio |	forked R processes (on current machine) |
+cluster	| all |	external R sessions on current, local, and/or remote machines |
+remote |	all	 | Simple access to remote R sessions |
+
+
+Before, without specifying the `plan`, the `future` package
+by default implements `plan(sequential)` for synchronous evaluation on the
+current process. We can specify parallel evaluation via `plan(multisession)` or
+`plan(multicore)` for forked processes (but for this demo we'll use multisession since 
+`multicore` does NOT work in RStudio). We'll also `tweak` the `multisession` plan
+to use four cores:
+
+```{r plan-future-example}
+# Compare the lapply with parallel version:
+plan_future_lapply_results <- microbenchmark(
+  plan_future_lapply = {
+    plan(tweak(multisession, workers = 4))
+    future_lapply_sim_list <- 
+      future_lapply(1:4, function(x) {
+        get_adapt_intercept_results(sim_pvals_data())
+        }, future.seed = NULL)
+    },
+  times = 10)
+plan_future_lapply_results
+```
 
 
